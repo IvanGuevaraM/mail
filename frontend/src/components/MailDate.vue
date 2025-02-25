@@ -1,13 +1,14 @@
 <template>
 	<Tooltip :text="tooltipText" :disabled="inList">
-		<div class="text-xs text-gray-600 cursor-pointer">
+		<div class="cursor-pointer text-xs text-gray-600">
 			{{ formattedDate }}
 		</div>
 	</Tooltip>
 </template>
-<script setup>
-import { inject, computed } from 'vue'
+<script setup lang="ts">
+import { computed, inject } from 'vue'
 import { Tooltip } from 'frappe-ui'
+
 import { timeAgo } from '@/utils'
 
 const dayjs = inject('$dayjs')
@@ -39,8 +40,8 @@ const formattedDate = computed(() => {
 const tooltipText = computed(() => {
 	return __(
 		`${dayjs(props.datetime).format('DD MMM YYYY')} at ${dayjs(props.datetime).format(
-			'h:mm A'
-		)}`
+			'h:mm A',
+		)}`,
 	)
 })
 </script>

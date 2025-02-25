@@ -8,6 +8,8 @@ app_license = "agpl-3.0"
 
 
 website_redirects = [
+	{"source": "/login", "target": "/mail/login"},
+	{"source": "/signup", "target": "/mail/signup"},
 	{
 		"source": "/auth/validate",
 		"target": "/api/method/mail.api.auth.validate",
@@ -36,11 +38,6 @@ website_redirects = [
 	{
 		"source": "/spamd/scan",
 		"target": "/api/method/mail.api.spamd.scan",
-		"redirect_http_status": 307,
-	},
-	{
-		"source": "/spamd/is-spam",
-		"target": "/api/method/mail.api.spamd.is_spam",
 		"redirect_http_status": 307,
 	},
 	{
@@ -212,7 +209,6 @@ scheduler_events = {
 	# ],
 	"daily": [
 		"mail.tasks.enqueue_delete_newsletters",
-		"mail.mail.doctype.mail_account_request.mail_account_request.expire_mail_account_requests",
 	],
 	# "hourly": [
 	#     "mail.tasks.hourly"
@@ -225,7 +221,7 @@ scheduler_events = {
 	# ],
 	"cron": {
 		"*/2 * * * *": [
-			"mail.tasks.enqueue_transfer_failed_emails_to_agent",
+			"mail.tasks.enqueue_transfer_mails_to_mail_agent",
 			"mail.tasks.enqueue_fetch_emails_from_mail_agents",
 		]
 	},

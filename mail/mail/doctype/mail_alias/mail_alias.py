@@ -6,10 +6,12 @@ from frappe import _
 from frappe.model.document import Document
 
 from mail.agent import create_alias_on_agents, delete_alias_from_agents, patch_alias_on_agents
+from mail.utils import normalize_email
 from mail.utils.cache import get_account_for_user, get_tenant_for_user
 from mail.utils.user import has_role, is_system_manager, is_tenant_admin
 from mail.utils.validation import (
 	is_email_assigned,
+	is_subaddressed_email,
 	is_valid_email_for_domain,
 	validate_domain_is_enabled_and_verified,
 	validate_domain_owned_by_tenant,
@@ -25,9 +27,10 @@ class MailAlias(Document):
 		self.set_tenant()
 
 	def validate(self) -> None:
-		self.validate_alias_for_name()
 		self.validate_domain()
 		self.validate_email()
+		self.set_normalized_email()
+		self.validate_alias_for_name()
 
 	def on_update(self) -> None:
 		self.clear_cache()
@@ -56,14 +59,6 @@ class MailAlias(Document):
 		if not self.tenant:
 			self.tenant = frappe.db.get_value("Mail Domain", self.domain_name, "tenant")
 
-	def validate_alias_for_name(self) -> None:
-		"""Validates the alias for name."""
-
-		if not frappe.db.get_value(self.alias_for_type, self.alias_for_name, "enabled"):
-			frappe.throw(
-				_("The {0} {1} is disabled.").format(self.alias_for_type, frappe.bold(self.alias_for_name))
-			)
-
 	def validate_domain(self) -> None:
 		"""Validates the domain."""
 
@@ -73,8 +68,32 @@ class MailAlias(Document):
 	def validate_email(self) -> None:
 		"""Validates the email address."""
 
+		is_subaddressed_email(self.email, raise_exception=True)
 		is_email_assigned(self.email, self.doctype, raise_exception=True)
 		is_valid_email_for_domain(self.email, self.domain_name, raise_exception=True)
+
+	def set_normalized_email(self) -> None:
+		"""Sets the normalized email."""
+
+		if not self.normalized_email:
+			self.normalized_email = normalize_email(self.email)
+
+	def validate_alias_for_name(self) -> None:
+		"""Validates the alias for name."""
+
+		tenant, enabled = frappe.db.get_value(self.alias_for_type, self.alias_for_name, ["tenant", "enabled"])
+
+		if self.tenant != tenant:
+			frappe.throw(
+				_("Domain {0} and {1} {2} must belong to the same tenant.").format(
+					frappe.bold(self.domain_name), self.alias_for_type, frappe.bold(self.alias_for_name)
+				)
+			)
+
+		if not enabled:
+			frappe.throw(
+				_("The {0} {1} is disabled.").format(self.alias_for_type, frappe.bold(self.alias_for_name))
+			)
 
 	def clear_cache(self) -> None:
 		"""Clears the Cache."""
@@ -83,13 +102,13 @@ class MailAlias(Document):
 
 		if self.alias_for_type == "Mail Account":
 			user = frappe.db.get_value("Mail Account", self.alias_for_name, "user")
-			frappe.cache.delete_value(f"user|{user}")
+			frappe.cache.hdel(f"user|{user}", "aliases")
 
 		if self.has_value_changed("alias_for_type") or self.has_value_changed("alias_for_name"):
 			if previous_doc := self.get_doc_before_save():
 				if previous_doc.alias_for_type == "Mail Account":
 					user = frappe.db.get_value("Mail Account", previous_doc.alias_for_name, "user")
-					frappe.cache.delete_value(f"user|{user}")
+					frappe.cache.hdel(f"user|{user}", "aliases")
 
 	def remove_alias_set_as_default_outgoing_email(self) -> None:
 		"""Removes the alias set as the default outgoing email."""

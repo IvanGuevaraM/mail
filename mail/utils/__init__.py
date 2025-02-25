@@ -1,4 +1,6 @@
+import base64
 import gzip
+import os
 import re
 import secrets
 import string
@@ -10,11 +12,35 @@ from typing import Literal
 import frappe
 from bs4 import BeautifulSoup
 from frappe import _
-from frappe.utils.background_jobs import get_jobs
 from frappe.utils.caching import redis_cache, request_cache
 
-from mail.utils.cache import get_root_domain_name
-from mail.utils.validation import validate_email_address
+
+def encode_image_to_base64(image_path: str) -> str:
+	"""Encodes an image to a base64 string with line breaks every 76 characters."""
+
+	image_path = os.path.abspath(image_path)
+	with open(image_path, "rb") as image:
+		image_base64 = base64.b64encode(image.read()).decode("utf-8")
+
+	chunk_size = 76
+	parts = [image_base64[i : i + chunk_size] for i in range(0, len(image_base64), chunk_size)]
+	return "\n".join(parts)
+
+
+def get_base64_image_data_uri(image_path: str) -> str:
+	"""Generates a base64 data URI for an image."""
+
+	image_base64 = encode_image_to_base64(image_path)
+	image_format = image_path.split(".")[-1]
+	return f"data:image/{image_format};base64,{image_base64}"
+
+
+def generate_otp(length=5) -> int:
+	"""Generates a random OTP."""
+
+	lower_bound = 10 ** (length - 1)
+	upper_bound = 10**length
+	return int.from_bytes(os.urandom(length), byteorder="big") % (upper_bound - lower_bound) + lower_bound
 
 
 def generate_secret(length: int = 32):
@@ -59,13 +85,14 @@ def load_compressed_file(file_path: str | None = None, file_data: bytes | None =
 		frappe.throw(_("Failed to load content from the compressed file."))
 
 
-def enqueue_job(method: str | Callable, **kwargs) -> None:
+def enqueue_job(method: str | Callable, deduplicate: bool = False, **kwargs) -> None:
 	"""Enqueues a background job."""
 
-	site = frappe.local.site
-	jobs = get_jobs(site=site)
-	if not jobs or method not in jobs[site]:
-		frappe.enqueue(method, **kwargs)
+	job_id = None
+	if deduplicate:
+		job_id = method.split(".")[-1] if isinstance(method, str) else method.__name__
+
+	frappe.enqueue(method, job_id=job_id, deduplicate=deduplicate, **kwargs)
 
 
 @request_cache
@@ -114,7 +141,28 @@ def get_in_reply_to(
 def check_deliverability(email: str) -> bool:
 	"""Wrapper function of `utils.validation.validate_email_address` for caching."""
 
+	from mail.utils.validation import validate_email_address
+
 	return validate_email_address(email, check_mx=True, verify=True, smtp_timeout=10)
+
+
+def remove_subaddressing(email: str) -> str:
+	"""Removes subaddressing from an email address.
+
+	Example:
+	    input: "user+filter@example.com"
+	    output: "user@example.com"
+	"""
+	match = re.match(r"([^+]+)(?:\+[^@]*)?(@.+)", email)
+	return f"{match.group(1)}{match.group(2)}" if match else email
+
+
+def normalize_email(email: str) -> str:
+	"""Normalize email by removing dots before the @."""
+
+	local, domain = email.split("@", 1)
+	normalized_local = re.sub(r"\.", "", local)
+	return f"{normalized_local}@{domain}"
 
 
 def get_dkim_host(domain_name: str, type: Literal["rsa", "ed25519"]) -> str:
@@ -140,5 +188,7 @@ def get_dmarc_address() -> str:
 	Returns DMARC address.
 	e.g. dmarc@rootdomain.com
 	"""
+
+	from mail.utils.cache import get_root_domain_name
 
 	return f"dmarc@{get_root_domain_name()}"

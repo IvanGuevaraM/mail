@@ -18,22 +18,22 @@ from urllib.parse import parse_qs, urlparse
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.query_builder import Interval
+from frappe.query_builder import Interval, Order
 from frappe.query_builder.functions import Now
 from frappe.utils import (
 	add_to_date,
 	cint,
+	create_batch,
 	flt,
 	get_datetime_str,
 	now,
-	random_string,
 	time_diff_in_seconds,
 	validate_email_address,
 )
 from frappe.utils.file_manager import save_file
 from uuid_utils import uuid7
 
-from mail.mail.doctype.bounce_log.bounce_log import is_email_blocked
+from mail.mail.doctype.bounce_history.bounce_history import is_recipient_blocked
 from mail.mail.doctype.mail_contact.mail_contact import create_mail_contact
 from mail.mail.doctype.mime_message.mime_message import (
 	create_mime_message,
@@ -41,7 +41,7 @@ from mail.mail.doctype.mime_message.mime_message import (
 	update_mime_message,
 )
 from mail.mail.doctype.spam_check_log.spam_check_log import create_spam_check_log
-from mail.smtp import SMTPContext
+from mail.smtp import SMTPContext, get_smtp_connection
 from mail.utils import (
 	convert_html_to_text,
 	get_in_reply_to,
@@ -88,7 +88,6 @@ class OutgoingMail(Document):
 		self.validate_amended_doc()
 		self.set_folder()
 		self.set_priority()
-		self.set_token()
 		self.validate_from_()
 		self.set_sender()
 		self.set_domain_name()
@@ -120,16 +119,16 @@ class OutgoingMail(Document):
 
 	def on_submit(self) -> None:
 		self.create_mail_contacts()
+		self._db_set(status="Pending", notify_update=True)
 
-		kwargs = {"status": "In Progress"}
-		if self.via_api and not self.is_newsletter and self.submitted_after <= 5:
-			kwargs.update({"priority": 1})
+		if not self.is_newsletter:
+			if self.via_api and self.submitted_after <= 5:
+				self._db_set(priority=1)
 
-		self._db_set(notify_update=True, **kwargs)
-		self.enqueue_process_for_delivery()
+			self.process_for_delivery()
 
 	def on_update_after_submit(self) -> None:
-		self.set_folder()
+		self.set_folder(db_set=True)
 
 	def on_trash(self) -> None:
 		if self.docstatus != 0 and frappe.session.user != "Administrator":
@@ -141,30 +140,26 @@ class OutgoingMail(Document):
 		if self.amended_from:
 			frappe.throw(_("Amending {0} is not allowed.").format(frappe.bold("Outgoing Mail")))
 
-	def set_folder(self) -> None:
+	def set_folder(self, db_set: bool = False) -> None:
 		"""Validates the folder"""
 
-		folder = self.folder
 		if self.docstatus == 0:
-			folder = "Drafts"
-		elif folder == "Drafts":
-			folder = "Sent"
-
-		if self.get("_action") == "update_after_submit":
-			self._db_set(folder=folder, notify_update=True)
+			self.folder = "Drafts"
+		elif self.docstatus == 1:
+			if self.status != "Sent":
+				self.folder = "Outbox"
+			elif self.folder != "Trash":
+				self.folder = "Sent"
 		else:
-			self.folder = folder
+			return
+
+		if db_set:
+			self._db_set(folder=self.folder, notify_update=True)
 
 	def set_priority(self) -> None:
 		"""Sets the priority."""
 
 		self.priority = -1 if self.is_newsletter else 0
-
-	def set_token(self):
-		"""Sets the token."""
-
-		if not self.token:
-			self.token = random_string(10)
 
 	def validate_from_(self) -> None:
 		"""Validates the from address."""
@@ -731,25 +726,15 @@ class OutgoingMail(Document):
 		if not status:
 			recipient_statuses = [r.status for r in self.recipients]
 			total_statuses = len(recipient_statuses)
-			status_counts = {
-				k: recipient_statuses.count(k) for k in ["", "Blocked", "Deferred", "Bounced", "Sent"]
-			}
+			status_counts = {k: recipient_statuses.count(k) for k in ["", "Blocked", "Sent"]}
 
 			if status_counts[""] == total_statuses:  # All recipients are in pending state (no status)
 				return
 
 			if status_counts["Blocked"] == total_statuses:  # All recipients are blocked
 				status = "Blocked"
-			elif status_counts["Deferred"] > 0:  # Any recipient is deferred
-				status = "Deferred"
 			elif status_counts["Sent"] == total_statuses:  # All recipients are sent
 				status = "Sent"
-			elif status_counts["Sent"] > 0:  # Any recipient is sent
-				status = "Partially Sent"
-			elif (
-				status_counts["Bounced"] > 0
-			):  # All recipients are bounced or some are blocked and some are bounced
-				status = "Bounced"
 
 		if status:
 			self.status = status
@@ -780,7 +765,7 @@ class OutgoingMail(Document):
 		# Reload the doc to ensure it reflects the latest status.
 		# This handles cases where the email's status might have been manually updated (e.g., Accepted) after the job was created.
 		self.reload()
-		if self.status != "In Progress":
+		if self.status not in ["Pending", "Queued"]:
 			return
 
 		kwargs = self._prepare_delivery_args()
@@ -798,7 +783,7 @@ class OutgoingMail(Document):
 		kwargs = {"status": "Accepted"}
 
 		for rcpt in self.recipients:
-			if is_email_blocked(rcpt.email):
+			if is_recipient_blocked(sender=self.from_, recipient=rcpt.email):
 				rcpt.status = "Blocked"
 				rcpt.error_message = _(
 					"Delivery to this recipient was blocked because their email address is on our blocklist. This action was taken after repeated delivery failures to this address. To protect your sender reputation and prevent further issues, this email was not sent to the blocked recipient."
@@ -875,7 +860,7 @@ class OutgoingMail(Document):
 
 		frappe.only_for("System Manager")
 
-		if self.status in ["In Progress", "Blocked"]:
+		if self.status in ["Pending", "Blocked"]:
 			for rcpt in self.recipients:
 				if rcpt.status == "Blocked":
 					rcpt.status = ""
@@ -906,15 +891,6 @@ class OutgoingMail(Document):
 		frappe.only_for("System Manager")
 		if self.status in ["Transferring"]:
 			frappe.flags.force_transfer = True
-			self.transfer_to_mail_agent()
-
-	@frappe.whitelist()
-	def retry_bounced(self) -> None:
-		"""Retries bounced email."""
-
-		frappe.only_for("System Manager")
-		if self.status == "Bounced":
-			self._db_set(status="Accepted", error_log=None, error_message=None, commit=True)
 			self.transfer_to_mail_agent()
 
 	@frappe.whitelist()
@@ -959,9 +935,25 @@ class OutgoingMail(Document):
 			username = mail_account.email
 			password = mail_account.get_password("password")
 
-			with SMTPContext(agent_or_group, 465, username, password, use_ssl=True) as server:
-				mail_options = [f"ENVID={self.name}:{self.token}", f"MT-PRIORITY={self.priority}"]
-				server.sendmail(self.from_, recipients, self.message, mail_options=mail_options)
+			mail_options = [f"ENVID={self.name}", f"MT-PRIORITY={self.priority}"]
+			if frappe.request and hasattr(frappe.request, "after_response"):
+				# Web worker:
+				# Retrieves an `SMTP` or `SMTP_SSL` session from the `SMTPConnectionPool`.
+				# Supports multiple concurrent connections for the same (host, port, user) key.
+				# Reuses existing connections across threads.
+				# Connections are gracefully closed by the cleanup thread.
+
+				with SMTPContext(agent_or_group, 465, username, password, use_ssl=True) as session:
+					session.sendmail(self.from_, recipients, self.message, mail_options=mail_options)
+			else:
+				# Background worker:
+				# Retrieves an `SMTPConnection` from a local cache.
+				# Ensures the same connection is reused throughout the job for the (host, port, user) key.
+				# Connection is gracefully closed when the job completes.
+
+				connection = get_smtp_connection(agent_or_group, 465, username, password, use_ssl=True)
+				connection.session.sendmail(self.from_, recipients, self.message, mail_options=mail_options)
+				connection.increment_email_count()
 
 			transfer_completed_at = now()
 			transfer_completed_after = time_diff_in_seconds(transfer_completed_at, transfer_started_at)
@@ -972,7 +964,9 @@ class OutgoingMail(Document):
 					rcpt.db_update()
 
 			self.update_status()
+			self.set_folder()
 			self._db_set(
+				folder=self.folder,
 				status=self.status,
 				transfer_completed_at=transfer_completed_at,
 				transfer_completed_after=transfer_completed_after,
@@ -1083,7 +1077,7 @@ def get_random_agent_or_agent_group(
 	if include_agents or exclude_agents:
 		agents = set(frappe.db.get_all("Mail Agent", {"enabled": 1, "enable_outbound": 1}, pluck="name"))
 		if include_agents:
-			if invalid_agents := [agent for agent in include_agents if agent not in agents]:
+			if invalid_agents := [agent for agent in include_agents if agent and agent not in agents]:
 				frappe.throw(
 					_("The following agents do not exist or are not enabled for outbound: {0}").format(
 						", ".join(invalid_agents)
@@ -1097,7 +1091,9 @@ def get_random_agent_or_agent_group(
 		selected_agent = random.choice(list(agents))
 	else:
 		if include_agent_groups:
-			if invalid_groups := [group for group in include_agent_groups if group not in agent_groups]:
+			if invalid_groups := [
+				group for group in include_agent_groups if group and group not in agent_groups
+			]:
 				frappe.throw(
 					_("The following agent groups do not exist or are not enabled for outbound: {0}").format(
 						", ".join(invalid_groups)
@@ -1153,10 +1149,10 @@ def create_outgoing_mail(
 	doc.via_api = via_api
 	doc.is_newsletter = is_newsletter
 
-	if via_api and not is_newsletter:
+	if doc.via_api and not doc.is_newsletter:
 		user = frappe.session.user
-		if from_ not in get_user_email_addresses(user):
-			from_ = get_default_outgoing_email_for_user(user)
+		if doc.from_ not in get_user_email_addresses(user):
+			doc.from_ = get_default_outgoing_email_for_user(user)
 
 	if not do_not_save:
 		doc.save()
@@ -1167,23 +1163,80 @@ def create_outgoing_mail(
 	return doc
 
 
-def transfer_failed_emails_to_agent() -> None:
-	"""Transfers the failed emails to the agent."""
+def process_email_transfer_batch(mails: list[str]) -> None:
+	"""Processes a batch of emails and transfer them to the agent."""
 
-	mails = frappe.db.get_all(
-		"Outgoing Mail",
-		{
-			"status": ["in", ["Failed", "Transferring"]],
-			"submitted_at": ["<=", add_to_date(now(), minutes=-60)],
-		},
-		pluck="name",
-	)
+	failed_mails = []
+
 	for mail in mails:
-		doc = frappe.get_doc("Outgoing Mail", mail)
-		if doc.status == "Failed":
-			doc.retry_failed()
-		else:
-			doc.force_transfer_to_mail_agent()
+		try:
+			outgoing_mail: OutgoingMail = frappe.get_doc("Outgoing Mail", mail)
+			match outgoing_mail.status:
+				case "Pending" | "Queued":
+					outgoing_mail.process_for_delivery()
+				case "Failed":
+					outgoing_mail.retry_failed()
+				case "Transferring":
+					outgoing_mail.force_transfer_to_mail_agent()
+		except Exception:
+			failed_mails.append(mail)
+			failed_count = len(failed_mails)
+			total_count = len(mails)
+			failure_ratio = failed_count / total_count
+			if (failure_ratio > 0.33) and (failed_count > 50):
+				frappe.throw(
+					_(
+						"Too many email transfer failures: {failed_count}/{total_count} ({failure_rate:.2%}). Process halted."
+					).format(failed_count=failed_count, total_count=total_count, failure_rate=failure_ratio)
+				)
+
+
+def transfer_mails_to_mail_agent() -> None:
+	"""Select emails and queues them for transfer to the agent."""
+
+	MAX_BATCH_SIZE = 5_000
+	BATCH_PROCESS_SIZE = 1_000
+
+	OM = frappe.qb.DocType("Outgoing Mail")
+	mails = (
+		frappe.qb.from_(OM)
+		.select(OM.name)
+		.where(
+			(OM.docstatus == 1)
+			& (
+				(OM.status == "Pending")
+				| ((OM.status == "Failed") & (Now() >= OM.retry_after))
+				| ((OM.status == "Transferring") & (OM.transfer_started_at <= (Now() - Interval(minutes=10))))
+			)
+		)
+		.orderby(OM.priority, order=Order.desc)
+		.orderby(OM.failed_count, OM.submitted_at, order=Order.asc)
+		.limit(MAX_BATCH_SIZE)
+	).run(pluck="name")
+
+	if not mails:
+		return
+
+	try:
+		(
+			frappe.qb.update(OM).set(OM.status, "Queued").where((OM.docstatus == 1) & (OM.name.isin(mails)))
+		).run()
+
+		for idx, batch in enumerate(create_batch(mails, BATCH_PROCESS_SIZE)):
+			frappe.enqueue(
+				process_email_transfer_batch,
+				queue="long",
+				job_name=f"process_email_transfer_batch_{idx+1}_{len(batch)}",
+				enqueue_after_commit=False,
+				mails=batch,
+			)
+
+		# Recursively process next batch if the limit was reached.
+		if len(mails) == MAX_BATCH_SIZE:
+			transfer_mails_to_mail_agent()
+
+	except Exception:
+		frappe.log_error("Error occurred while queuing emails for transfer.")
 
 
 def delete_newsletters() -> None:

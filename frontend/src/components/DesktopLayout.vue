@@ -7,13 +7,13 @@
 				>
 					<AppSidebar />
 				</div>
-				<div class="w-full overflow-auto" id="scrollContainer">
+				<div id="scrollContainer" class="w-full overflow-auto">
 					<slot />
 				</div>
 			</div>
 		</div>
 	</div>
 </template>
-<script setup>
+<script setup lang="ts">
 import AppSidebar from './AppSidebar.vue'
 </script>

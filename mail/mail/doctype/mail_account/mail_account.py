@@ -1,8 +1,6 @@
 # Copyright (c) 2025, Frappe Technologies Pvt. Ltd. and contributors
 # For license information, please see license.txt
 
-from typing import Literal
-
 import bcrypt
 import frappe
 from frappe import _
@@ -10,11 +8,12 @@ from frappe.model.document import Document
 from frappe.utils import random_string
 
 from mail.agent import create_account_on_agents, delete_account_from_agents, patch_account_on_agents
-from mail.utils import get_dmarc_address
+from mail.utils import get_dmarc_address, normalize_email
 from mail.utils.cache import get_aliases_for_user, get_tenant_for_user
 from mail.utils.user import has_role, is_system_manager, is_tenant_admin
 from mail.utils.validation import (
 	is_email_assigned,
+	is_subaddressed_email,
 	is_valid_email_for_domain,
 	validate_domain_is_enabled_and_verified,
 	validate_domain_owned_by_tenant,
@@ -36,6 +35,7 @@ class MailAccount(Document):
 		self.validate_user_tenant()
 		self.validate_tenant_max_accounts()
 		self.validate_email()
+		self.set_normalized_email()
 		self.validate_password()
 		self.validate_default_outgoing_email()
 		self.validate_display_name()
@@ -109,9 +109,6 @@ class MailAccount(Document):
 	def validate_tenant_max_accounts(self) -> None:
 		"""Validates the Tenant Max Accounts."""
 
-		if is_system_manager(frappe.session.user):
-			return
-
 		total_accounts = frappe.db.count("Mail Account", filters={"tenant": self.tenant, "enabled": 1})
 		max_accounts = frappe.db.get_value("Mail Tenant", self.tenant, "max_accounts")
 		if total_accounts >= max_accounts:
@@ -126,9 +123,15 @@ class MailAccount(Document):
 
 		if not self.email:
 			frappe.throw(_("Email is mandatory."))
-
+		is_subaddressed_email(self.email, raise_exception=True)
 		is_email_assigned(self.email, self.doctype, raise_exception=True)
 		is_valid_email_for_domain(self.email, self.domain_name, raise_exception=True)
+
+	def set_normalized_email(self) -> None:
+		"""Sets the normalized email."""
+
+		if not self.normalized_email:
+			self.normalized_email = normalize_email(self.email)
 
 	def validate_password(self) -> None:
 		"""Generates secret if password is changed"""
@@ -161,8 +164,8 @@ class MailAccount(Document):
 	def clear_cache(self) -> None:
 		"""Clears the Cache."""
 
-		frappe.cache.delete_value(f"user|{self.user}")
-		frappe.cache.delete_value(f"email|{self.email}")
+		frappe.cache.hdel(f"user|{self.user}", ["account", "default_outgoing_email"])
+		frappe.cache.hdel(f"email|{self.email}", "account")
 
 	def generate_secret(self) -> None:
 		"""Generates secret from password"""
@@ -177,19 +180,28 @@ def _create_user_for_mail_account(
 	first_name: str,
 	last_name: str | None = None,
 	password: str | None = None,
-	role: Literal["Mail User", "Mail Admin"] = "Mail User",
+	is_admin: bool = False,
 ) -> str:
 	"""Creates a User for Mail Account"""
 
 	if frappe.db.exists("User", {"email": email}):
 		frappe.throw(_("User with email {0} already exists.").format(frappe.bold(email)))
 
-	if role not in ["Mail User", "Mail Admin"]:
-		frappe.throw(_("Invalid role. Please select a valid role."))
-
 	roles = ["Mail User"]
-	if role == "Mail Admin":
+	if is_admin:
 		roles.append("Mail Admin")
+
+	return create_user(email, first_name, last_name, password, roles)
+
+
+def create_user(
+	email: str,
+	first_name: str,
+	last_name: str | None = None,
+	password: str | None = None,
+	roles: list[str] | None = None,
+) -> str:
+	"""Creates a User document"""
 
 	user = frappe.new_doc("User")
 	user.first_name = first_name
@@ -198,7 +210,8 @@ def _create_user_for_mail_account(
 	user.email = email
 	user.owner = email
 	user.send_welcome_email = 0
-	user.append_roles(*roles)
+	if roles:
+		user.append_roles(*roles)
 	if password:
 		user.new_password = password
 	user.insert(ignore_permissions=True)
@@ -206,11 +219,11 @@ def _create_user_for_mail_account(
 	return user.name
 
 
-def _add_user_to_tenant(tenant: str, user: str, role: str) -> None:
+def _add_user_to_tenant(tenant: str, user: str, is_admin: bool) -> None:
 	"""Adds a User to a Tenant"""
 
 	tenant = frappe.get_doc("Mail Tenant", tenant)
-	tenant.add_member(user, is_admin=role == "Mail Admin")
+	tenant.add_member(user, is_admin)
 
 
 def create_mail_account(
@@ -219,15 +232,15 @@ def create_mail_account(
 	first_name: str,
 	last_name: str | None = None,
 	password: str | None = None,
-	role: Literal["Mail User", "Mail Admin"] = "Mail User",
+	is_admin: bool = False,
 ) -> "MailAccount":
 	"""Creates a Mail Account"""
 
 	if frappe.db.exists("Mail Account", email):
 		frappe.throw(_("Mail Account {0} already exists.").format(frappe.bold(email)))
 
-	user = _create_user_for_mail_account(email, first_name, last_name, password, role)
-	_add_user_to_tenant(tenant, user, role)
+	user = _create_user_for_mail_account(email, first_name, last_name, password, is_admin)
+	_add_user_to_tenant(tenant, user, is_admin)
 	account = frappe.new_doc("Mail Account")
 	account.domain_name = email.split("@")[1]
 	account.user = user

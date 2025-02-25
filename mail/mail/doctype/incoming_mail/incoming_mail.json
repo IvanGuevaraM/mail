@@ -11,6 +11,7 @@
   "reply_to",
   "column_break_hpzu",
   "receiver",
+  "delivered_to",
   "in_reply_to_mail_type",
   "in_reply_to_mail_name",
   "subject",
@@ -311,10 +312,8 @@
    "read_only": 1
   },
   {
-   "depends_on": "eval: doc.docstatus == 0",
    "fieldname": "in_reply_to_mail_type",
    "fieldtype": "Select",
-   "hidden": 1,
    "label": "In Reply To Mail Type",
    "no_copy": 1,
    "options": "\nIncoming Mail\nOutgoing Mail",
@@ -323,10 +322,9 @@
   },
   {
    "fieldname": "in_reply_to_mail_name",
-   "fieldtype": "Dynamic Link",
-   "label": "In Reply To",
+   "fieldtype": "Data",
+   "label": "In Reply To Mail Name",
    "no_copy": 1,
-   "options": "in_reply_to_mail_type",
    "read_only": 1,
    "search_index": 1
   },
@@ -427,6 +425,17 @@
    "read_only": 1,
    "reqd": 1,
    "search_index": 1
+  },
+  {
+   "fieldname": "delivered_to",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Delivered To",
+   "no_copy": 1,
+   "options": "Email",
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "in_create": 1,
@@ -439,7 +448,7 @@
    "link_fieldname": "incoming_mail"
   }
  ],
- "modified": "2025-02-04 10:45:06.278146",
+ "modified": "2025-02-19 17:54:12.262442",
  "modified_by": "Administrator",
  "module": "Mail",
  "name": "Incoming Mail",

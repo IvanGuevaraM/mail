@@ -4,7 +4,7 @@
 			<div class="font-semibold">
 				{{ mail.display_name ? mail.display_name : mail.sender }}
 			</div>
-			<MailDate :datetime="mail.creation" :inList="true" />
+			<MailDate :datetime="mail.creation" :in-list="true" />
 		</div>
 		<div class="subject text-xs">
 			{{ mail.subject }}
@@ -14,10 +14,10 @@
 		</div>
 	</div>
 </template>
-<script setup>
+<script setup lang="ts">
 import MailDate from './MailDate.vue'
 
-const props = defineProps({
+defineProps({
 	mail: {
 		type: Object,
 		required: true,
@@ -27,6 +27,7 @@ const props = defineProps({
 <style>
 .snippet {
 	display: -webkit-box;
+	line-clamp: 2;
 	-webkit-line-clamp: 2;
 	-webkit-box-orient: vertical;
 	text-overflow: ellipsis;
@@ -37,6 +38,7 @@ const props = defineProps({
 
 .subject {
 	display: -webkit-box;
+	line-clamp: 1;
 	-webkit-line-clamp: 1;
 	-webkit-box-orient: vertical;
 	text-overflow: ellipsis;

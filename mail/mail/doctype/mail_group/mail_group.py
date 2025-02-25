@@ -6,10 +6,12 @@ from frappe import _
 from frappe.model.document import Document
 
 from mail.agent import create_group_on_agents, delete_group_from_agents, patch_group_on_agents
+from mail.utils import normalize_email
 from mail.utils.cache import get_tenant_for_user
 from mail.utils.user import has_role, is_system_manager, is_tenant_admin
 from mail.utils.validation import (
 	is_email_assigned,
+	is_subaddressed_email,
 	is_valid_email_for_domain,
 	validate_domain_is_enabled_and_verified,
 	validate_domain_owned_by_tenant,
@@ -28,6 +30,7 @@ class MailGroup(Document):
 		self.validate_enabled()
 		self.validate_domain()
 		self.validate_email()
+		self.set_normalized_email()
 		self.validate_tenant_max_groups()
 
 	def on_update(self) -> None:
@@ -76,14 +79,18 @@ class MailGroup(Document):
 	def validate_email(self) -> None:
 		"""Validates the email address."""
 
+		is_subaddressed_email(self.email, raise_exception=True)
 		is_email_assigned(self.email, self.doctype, raise_exception=True)
 		is_valid_email_for_domain(self.email, self.domain_name, raise_exception=True)
 
+	def set_normalized_email(self) -> None:
+		"""Sets the normalized email."""
+
+		if not self.normalized_email:
+			self.normalized_email = normalize_email(self.email)
+
 	def validate_tenant_max_groups(self) -> None:
 		"""Validates the Tenant Max Groups."""
-
-		if is_system_manager(frappe.session.user):
-			return
 
 		total_groups = frappe.db.count("Mail Group", filters={"tenant": self.tenant, "enabled": 1})
 		max_groups = frappe.db.get_value("Mail Tenant", self.tenant, "max_groups")
@@ -97,12 +104,12 @@ class MailGroup(Document):
 	def clear_cache(self) -> None:
 		"""Clears the Cache."""
 
-		frappe.cache.delete_value(f"tenant|{self.tenant}")
+		frappe.cache.hdel(f"tenant|{self.tenant}", "groups")
 
 		if self.has_value_changed("tenant"):
 			if previous_doc := self.get_doc_before_save():
 				if previous_doc.tenant:
-					frappe.cache.delete_value(f"tenant|{previous_doc.tenant}")
+					frappe.cache.hdel(f"tenant|{previous_doc.tenant}", "groups")
 
 
 def has_permission(doc: "Document", ptype: str, user: str | None = None) -> bool:

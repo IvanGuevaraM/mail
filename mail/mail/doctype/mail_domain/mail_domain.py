@@ -65,9 +65,6 @@ class MailDomain(Document):
 	def validate_tenant_max_domains(self) -> None:
 		"""Validates the Tenant Max Domains."""
 
-		if is_system_manager(frappe.session.user):
-			return
-
 		total_domains = frappe.db.count("Mail Domain", filters={"tenant": self.tenant, "enabled": 1})
 		max_domains = frappe.db.get_value("Mail Tenant", self.tenant, "max_domains")
 		if total_domains >= max_domains:
@@ -130,7 +127,7 @@ class MailDomain(Document):
 			frappe.msgprint(_("DNS Records refreshed successfully."), indicator="green", alert=True)
 
 	@frappe.whitelist()
-	def verify_dns_records(self, do_not_save: bool = False) -> None:
+	def verify_dns_records(self, do_not_save: bool = False) -> bool:
 		"""Verifies the DNS Records."""
 
 		if not has_permission(self, "write"):
@@ -155,6 +152,8 @@ class MailDomain(Document):
 		if not do_not_save:
 			self.save(ignore_permissions=True)
 
+		return bool(self.is_verified)
+
 	@frappe.whitelist()
 	def rotate_dkim_keys(self) -> None:
 		"""Rotates the DKIM Keys."""
@@ -168,12 +167,12 @@ class MailDomain(Document):
 	def clear_cache(self) -> None:
 		"""Clears the Cache."""
 
-		frappe.cache.delete_value(f"tenant|{self.tenant}")
+		frappe.cache.hdel(f"tenant|{self.tenant}", "domains")
 
 		if self.has_value_changed("tenant"):
 			if previous_doc := self.get_doc_before_save():
 				if previous_doc.tenant:
-					frappe.cache.delete_value(f"tenant|{previous_doc.tenant}")
+					frappe.cache.hdel(f"tenant|{previous_doc.tenant}", "domains")
 
 
 def get_dns_records(domain_name: str) -> list[dict]:
@@ -193,24 +192,13 @@ def get_dns_records(domain_name: str) -> list[dict]:
 		},
 	)
 
-	# DKIM Records
-	# RSA
+	# DKIM Record
 	records.append(
 		{
 			"category": "Sending Record",
 			"type": "CNAME",
 			"host": f"{get_dkim_selector('rsa')}._domainkey.{domain_name}",
 			"value": f"{get_dkim_host(domain_name, 'rsa')}._domainkey.{mail_settings.root_domain_name}.",
-			"ttl": mail_settings.default_ttl,
-		}
-	)
-	# Ed25519
-	records.append(
-		{
-			"category": "Sending Record",
-			"type": "CNAME",
-			"host": f"{get_dkim_selector('ed25519')}._domainkey.{domain_name}",
-			"value": f"{get_dkim_host(domain_name, 'ed25519')}._domainkey.{mail_settings.root_domain_name}.",
 			"ttl": mail_settings.default_ttl,
 		}
 	)

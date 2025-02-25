@@ -13,7 +13,7 @@ from frappe.utils import now, time_diff_in_seconds
 from uuid_utils import uuid7
 
 from mail.imap import IMAPContext
-from mail.mail.doctype.bounce_log.bounce_log import create_or_update_bounce_log
+from mail.mail.doctype.bounce_history.bounce_history import create_or_update_bounce_history
 from mail.mail.doctype.dmarc_report.dmarc_report import create_dmarc_report
 from mail.mail.doctype.mail_contact.mail_contact import create_mail_contact
 from mail.mail.doctype.mime_message.mime_message import (
@@ -84,6 +84,7 @@ class IncomingMail(Document):
 		self.status = "Submitted"
 
 		parser = EmailParser(self.message)
+		self.delivered_to = parser.get_delivered_to()
 		self.display_name, self.sender = parser.get_sender()
 		self.domain_name = self.receiver.split("@")[1]
 		self.subject = parser.get_subject()
@@ -146,19 +147,13 @@ class IncomingMail(Document):
 
 		try:
 			original_envelope_id = None
-			token = None
-
 			for part in message.walk():
 				if part.get("Original-Envelope-Id"):
-					original_envelope_id, token = part.get("Original-Envelope-Id").split(":")
+					original_envelope_id = part.get("Original-Envelope-Id")
 					break
 
-			if not original_envelope_id or not token:
-				frappe.throw(_("Original Envelope Id or Token not found in DSN Report."))
-
-			outgoing_mail = frappe.get_doc("Outgoing Mail", original_envelope_id)
-			if outgoing_mail.token != token:
-				frappe.throw(_("Token mismatch in DSN Report."))
+			if not original_envelope_id:
+				frappe.throw(_("Original Envelope Id not found in DSN Report."))
 
 			dsn_data = []
 			required_headers = [
@@ -178,7 +173,6 @@ class IncomingMail(Document):
 					dsn_data.append(_rcpt_data)
 					_rcpt_data = {}
 
-			rcpt_status_changed = False
 			for rcpt_data in dsn_data:
 				final_recipient = rcpt_data["Final-Recipient"].split("rfc822;")[1].strip()
 				diagnostic_code = rcpt_data["Diagnostic-Code"].split("smtp;")[1].strip()
@@ -191,21 +185,16 @@ class IncomingMail(Document):
 					},
 					indent=4,
 				)
-
-				for rcpt in outgoing_mail.recipients:
-					if rcpt.email == final_recipient:
-						rcpt_status_changed = True
-						rcpt.status = "Bounced"
-						rcpt.response = response
-						rcpt.db_update()
-
-						if rcpt.status == "Bounced":
-							create_or_update_bounce_log(rcpt.email, bounce_increment=1)
-
-			if rcpt_status_changed:
-				outgoing_mail.update_status(db_set=True, notify_update=True)
+				create_or_update_bounce_history(
+					sender=self.delivered_to,
+					recipient=final_recipient,
+					bounce_increment=1,
+					last_bounce_response=response,
+				)
 
 			self.type = "DSN Report"
+			self.in_reply_to_mail_type = "Outgoing Mail"
+			self.in_reply_to_mail_name = original_envelope_id
 
 		except Exception:
 			frappe.log_error(

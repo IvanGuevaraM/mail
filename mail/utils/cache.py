@@ -8,7 +8,7 @@ def get_root_domain_name() -> str | None:
 	def generator() -> str | None:
 		return frappe.db.get_single_value("Mail Settings", "root_domain_name")
 
-	return frappe.cache.get_value("root_domain_name", generator)
+	return frappe.cache.hget("mail-settings", "root_domain_name", generator)
 
 
 def get_smtp_limits() -> dict:
@@ -24,7 +24,7 @@ def get_smtp_limits() -> dict:
 			"cleanup_interval": mail_settings.smtp_cleanup_interval,
 		}
 
-	return frappe.cache.get_value("smtp_limits", generator)
+	return frappe.cache.hget("mail-settings", "smtp_limits", generator)
 
 
 def get_imap_limits() -> dict:
@@ -40,7 +40,7 @@ def get_imap_limits() -> dict:
 			"cleanup_interval": mail_settings.imap_cleanup_interval,
 		}
 
-	return frappe.cache.get_value("imap_limits", generator)
+	return frappe.cache.hget("mail-settings", "imap_limits", generator)
 
 
 def get_domains_owned_by_tenant(tenant: str) -> list:
@@ -140,7 +140,7 @@ def get_blacklist_for_ip_group(ip_group: str) -> list:
 			.where(IP_BLACKLIST.ip_group == ip_group)
 		).run(as_dict=True)
 
-	return frappe.cache.get_value(f"blacklist|{ip_group}", generator)
+	return frappe.cache.hget("ip-blacklist", ip_group, generator)
 
 
 def get_primary_agents() -> list:
@@ -155,3 +155,43 @@ def get_primary_agents() -> list:
 		).run(pluck="name")
 
 	return frappe.cache.get_value("primary_agents", generator)
+
+
+def get_rate_limits(method_path: str) -> list:
+	"""Returns the rate limits for the method path."""
+
+	def generator() -> list:
+		RATE_LIMIT = frappe.qb.DocType("Rate Limit")
+		rate_limits = (
+			frappe.qb.from_(RATE_LIMIT)
+			.select(
+				RATE_LIMIT.ignore_in_developer_mode,
+				RATE_LIMIT.key_.as_("key"),
+				RATE_LIMIT.limit,
+				RATE_LIMIT.seconds,
+				RATE_LIMIT.methods,
+				RATE_LIMIT.ip_based,
+				RATE_LIMIT.ignored_ips,
+			)
+			.where((RATE_LIMIT.enabled == 1) & (RATE_LIMIT.method_path == method_path))
+		).run(as_dict=True)
+
+		if not rate_limits:
+			return []
+
+		for rl in rate_limits:
+			rl["ignore_in_developer_mode"] = bool(rl["ignore_in_developer_mode"])
+			rl["methods"] = rl["methods"].split("\n")
+			rl["ip_based"] = bool(rl["ip_based"])
+
+			if len(rl["methods"]) == 1 and rl["methods"][0] == "ALL":
+				rl["methods"] = "ALL"
+
+			if rl["ip_based"]:
+				rl["ignored_ips"] = rl["ignored_ips"].split("\n") if rl["ignored_ips"] else []
+			else:
+				rl.pop("ignored_ips")
+
+		return rate_limits
+
+	return frappe.cache.hget("rate_limits", method_path, generator)

@@ -5,9 +5,11 @@ from frappe import _
 from frappe.utils import cint
 
 from mail.mail.doctype.outgoing_mail.outgoing_mail import create_outgoing_mail
+from mail.utils.rate_limiter import dynamic_rate_limit
 
 
 @frappe.whitelist(methods=["POST"])
+@dynamic_rate_limit()
 def send(
 	from_: str,
 	subject: str,
@@ -48,6 +50,7 @@ def send(
 
 
 @frappe.whitelist(methods=["POST"])
+@dynamic_rate_limit()
 def send_raw(
 	from_: str,
 	to: str | list[str],
